@@ -7,6 +7,7 @@ import functools
 import warnings
 from collections import OrderedDict
 from typing import Any, List, Optional
+import torch.autograd.forward_ad as fwAD
 
 # Formerly known as: _ContextMethodMixin
 class FunctionCtx(object):
@@ -14,9 +15,8 @@ class FunctionCtx(object):
     def save_for_backward(self, *tensors: torch.Tensor):
         r"""Saves given tensors for a future call to :func:`~Function.backward`.
 
-        **This should be called at most once, and only from inside the**
-        :func:`forward` **method. This should only be called with input or
-        output tensors**
+        This should be called at most once, and only from inside the
+        :func:`forward` method. This method should only be called with tensors.
 
         In :func:`backward`, saved tensors can be accessed through the :attr:`saved_tensors`
         attribute. Before returning them to the user, a check is made to ensure
@@ -53,6 +53,64 @@ class FunctionCtx(object):
 
         """
         self.to_save = tensors
+
+    def save_for_forward(self, *tensors: torch.Tensor):
+        r"""Saves given tensors for a future call to :func:`~Function.jvp`.
+
+        This should be only called from inside the :func:`forward` method.
+        This method should only be called with tensors.
+
+        In :func:`jvp`, saved objects can be accessed through the :attr:`saved_tensors`
+        attribute. Before returning them to the user, the primals of the dual tensors
+        are unpacked for convenience.
+
+        Arguments can also be ``None``. This is a no-op.
+
+        See :ref:`extending-autograd` for more details on how to use this method.
+
+        Example::
+            >>> class Func(torch.autograd.Function):
+            >>>     @staticmethod
+            >>>     def forward(ctx, x: torch.Tensor, y: torch.Tensor, z: int):
+            >>>         ctx.save_for_backward(x, y)
+            >>>         ctx.save_for_forward(x, y)
+            >>>         ctx.z = z
+            >>>         ctx.prod = x * y
+            >>>         return z * ctx.prod
+            >>>
+            >>>     @staticmethod
+            >>>     def jvp(ctx, x_t, y_t, _):
+            >>>         x_p, y_p = ctx.saved_tensors
+            >>>         z = ctx.z
+            >>>         return z * (y_p * x_t + x_p * y_t)
+            >>>
+            >>>     @staticmethod
+            >>>     def vjp(ctx, grad_out):
+            >>>         x, y = ctx.saved_tensors
+            >>>         z = ctx.z
+            >>>         return z * grad_out * y, z * grad_out * x, None
+            >>>
+            >>>     a = torch.tensor(1., requires_grad=True, dtype=torch.double)
+            >>>     t = torch.tensor(1., dtype=torch.double)
+            >>>     b = torch.tensor(2., requires_grad=True, dtype=torch.double)
+            >>>     c = 4
+            >>>
+            >>>     with fwAD.dual_level():
+            >>>         a_dual = fwAD.make_dual(a, t)
+            >>>         d = Func.apply(a_dual, b, c)
+
+        """
+        primals = []
+        for tensor in tensors:
+            assert isinstance(tensor, torch.Tensor) or tensor is None, (
+                "save_for_forward expects all arguments to be tensors; you should "
+                "save non-tensors as attributes on ctx.")
+            if tensor is None:
+                primals.append(None)
+            else:
+                primals.append(fwAD.unpack_dual(tensor).primal)
+
+        self.saved_for_forward = tuple(primals)
 
     def mark_dirty(self, *args: torch.Tensor):
         r"""Marks given tensors as modified in an in-place operation.
